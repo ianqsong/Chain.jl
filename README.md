@@ -2,7 +2,7 @@
 
 **The following is ONLY a POC.**
 
-The macro `@_` is based on [Chain.jl](https://github.com/jkrumbiegel/Chain.jl.git) and uses `__` instead of `_` as the placeholder. Borrow functions from[Underscores.jl](https://github.com/c42f/Underscores.jl/) and we can define anonymous functions in the pipe block as expressions of `_` or `_1,_2,...` (or `_₁,_₂,...`).
+The macro `@_` is based on [Chain.jl](https://github.com/jkrumbiegel/Chain.jl.git) and uses `__` instead of `_` as the placeholder. Borrow functions from [Underscores.jl](https://github.com/c42f/Underscores.jl/) and we can define anonymous functions in the pipe block as expressions of `_` or `_1,_2,...` (or `_₁,_₂,...`).
 
 ## Examples
 
@@ -23,8 +23,8 @@ end
 
 ```julia
 @chain [1:5, 4:10] begin
-  map(x -> x[end]^2, __)
-  filter(isodd, __)
+  map(x -> x[end]^2, _)
+  filter(isodd, _)
 end
 ```
 
