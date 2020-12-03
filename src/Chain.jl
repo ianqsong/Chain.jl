@@ -1,6 +1,6 @@
-module Chain
+module Chain_
 
-export @chain
+export @_
 
 is_aside(x) = false
 is_aside(x::Expr) = x.head == :macrocall && x.args[1] == Symbol("@aside")
@@ -84,7 +84,7 @@ function replace_underscores(expr::Expr, replacement)
     if expr.head == :macrocall && expr.args[1] == Symbol("@chain")
         length(expr.args) != 4 && error("Malformed nested @chain macro")
         expr.args[2] isa LineNumberNode || error("Malformed nested @chain macro")
-        arg3 = if expr.args[3] == Symbol("_")
+        arg3 = if expr.args[3] == Symbol("__")
             found_underscore = true
             replacement
         else
@@ -102,10 +102,154 @@ function replace_underscores(expr::Expr, replacement)
 end
 
 function replace_underscores(x, replacement)
-    if x == Symbol("_")
+    if x == Symbol("__")
         true, replacement
     else
         false, x
+    end
+end
+
+"""
+    @_ firstpart block
+
+Borrow functions from [Underscores.jl](https://github.com/c42f/Underscores.jl/) and anonymous
+functions can be written as expressions of `_` or `_1,_2,...` (or `_₁,_₂,...`).
+"""
+
+macro _(firstpart, block)
+    rewrite_chain_block_more(firstpart, block)
+end
+
+function rewrite_chain_block_more(firstpart, block)
+    if !(block isa Expr && block.head == :block)
+        error("Second argument of @chain must be a begin / end block")
+    end
+
+    block_expressions = block.args
+    isempty(block_expressions) && error("No expressions found in chain block.")
+
+    rewritten_exprs = []
+    replacement = firstpart
+
+    for expr in block_expressions
+        rewritten, replacement = rewrite(lower_underscores(expr), replacement)
+        push!(rewritten_exprs, rewritten)
+    end
+
+    result = Expr(:let, Expr(:block), Expr(:block, rewritten_exprs...))
+
+    :($(esc(result)))
+end
+
+isquoted(ex) = ex isa Expr && ex.head in (:quote, :inert, :meta)
+
+function _replacesyms(sym_map, ex)
+    if ex isa Symbol
+        return sym_map(ex)
+    elseif ex isa Expr
+        if isquoted(ex)
+            return ex
+        end
+        args = map(e->_replacesyms(sym_map, e), ex.args)
+        return Expr(ex.head, args...)
+    else
+        return ex
+    end
+end
+
+function add_closures(ex, prefix, pattern)
+    if ex isa Expr && (ex.head == :kw || ex.head == :parameters)
+        return Expr(ex.head, map(e->add_closures(e,prefix,pattern), ex.args)...)
+    end
+    plain_nargs = false
+    numbered_nargs = 0
+    body = _replacesyms(ex) do sym
+        m = match(pattern, string(sym))
+        if m === nothing
+            sym
+        else
+            argnum_str = m[1]
+            if isempty(argnum_str)
+                plain_nargs = true
+                argnum = 1
+            else
+                if !isdigit(argnum_str[1])
+                    argnum_str = map(c->c-'₀'+'0', argnum_str)
+                end
+                argnum = parse(Int, argnum_str)
+                numbered_nargs = max(numbered_nargs, argnum)
+            end
+            Symbol(prefix, argnum)
+        end
+    end
+    if plain_nargs && numbered_nargs > 0
+        throw(ArgumentError("Cannot mix plain and numbered `$prefix` placeholders in `$ex`"))
+    end
+    nargs = max(plain_nargs, numbered_nargs)
+    if nargs == 0
+        return ex
+    end
+    argnames = map(i->Symbol(prefix,i), 1:nargs)
+    return :(($(argnames...),) -> $body)
+end
+
+replace_(ex)  = add_closures(ex, "_", r"^_([0-9]*|[₀-₉]*)$")
+
+const _square_bracket_ops = [:comprehension, :typed_comprehension, :generator,
+                             :ref, :vcat, :typed_vcat, :hcat, :typed_hcat, :row]
+                             
+_isoperator(x) = x isa Symbol && Base.isoperator(x)
+
+function lower_inner(ex)
+    if ex isa Expr
+        if ex.head == :(=) ||
+            (ex.head == :call && length(ex.args) > 1 &&
+                (_isoperator(ex.args[1]) || 
+                    (ex.args[2] isa Expr && ex.args[2].args[1] == Symbol("=>"))
+                )
+            )
+            # Infix operators do not count as outermost function call
+            return Expr(ex.head, ex.args[1],
+                map(lower_inner, ex.args[2:end])...)
+        elseif ex.head in _square_bracket_ops || ex.head == :if
+            # Indexing & other square brackets not counted as outermost function
+            return Expr(ex.head, map(lower_inner, ex.args)...)
+        elseif ex.head == :. && length(ex.args) == 2 && ex.args[2] isa QuoteNode
+            # Getproperty also doesn't count
+            return Expr(ex.head, map(lower_inner, ex.args)...)
+        elseif ex.head == :. && length(ex.args) == 2 &&
+            ex.args[2] isa Expr && ex.args[2].head == :tuple
+            # Broadcast calls treated as normal calls for underscore lowering
+            return Expr(ex.head, replace_(ex.args[1]),
+                                  Expr(:tuple, map(replace_, ex.args[2].args)...))
+        else
+            # For other syntax, replace _ in args individually
+            return Expr(ex.head, map(replace_, ex.args)...)
+        end
+    else
+        return ex
+    end
+end
+
+const _pipeline_ops = [:|>, :<|, :∘, :.|>, :.<|]
+
+function lower_underscores(ex)
+    if ex isa Expr
+        if isquoted(ex)
+            return ex
+        elseif ex.head == :call && length(ex.args) > 1 &&
+               ex.args[1] in _pipeline_ops
+            # Special case for pipelining and composition operators
+            return Expr(ex.head, ex.args[1],
+                        map(lower_underscores, ex.args[2:end])...)
+        elseif ex.head == :do
+            error("@_ expansion for `do` syntax is reserved")
+        else
+            # For other syntax, replace __ over the entire expression
+            return lower_inner(ex)
+        end
+    else
+        return ex
     end
 end
 
